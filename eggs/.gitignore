@@ -1,0 +1,3 @@
+#ignore installed eggs in this directory, added during buildoud
+*
+!.gitignore

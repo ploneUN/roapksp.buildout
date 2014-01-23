@@ -1,0 +1,3 @@
+#Ignore everything in this directory, it's pypi package download cache
+*
+!.gitignore
