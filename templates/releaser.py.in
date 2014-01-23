@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+
+import subprocess, os, sys, re
+from zest.releaser.vcs import BaseVersionControl
+from zest.releaser.choose import version_control
+from zest.releaser import utils
+from zest.releaser import git, hg, bzr, svn
+import shutil
+from ConfigParser import ConfigParser
+from StringIO import StringIO
+
+class BaseStatusChecker(object):
+
+    def __init__(self, vcs):
+        self.vcs = vcs
+        self._last_log = None
+
+    def _update_log(self):
+        vcs = self.vcs
+        available_tags = vcs.available_tags()
+        if not available_tags:
+            self._lag_log = ''
+            return
+        logcmd = vcs.cmd_log_since_tag(available_tags[-1])
+        p = subprocess.Popen(logcmd.split(), stdout=subprocess.PIPE)
+        retval = p.wait()
+        out = p.stdout.read()
+        self._last_log = out
+
+    def need_release(self):
+        vcs = self.vcs
+        available_tags = vcs.available_tags()
+        if not available_tags:
+            return True
+
+        log = self.log_since_last_release()
+        # remove the final few lines
+        return self._determine_needrelease_from_log(log)
+
+    def _clean_log(self, log):
+        raise NotImplementedError
+
+    def log_since_last_release(self):
+        if self._last_log is None:
+            self._update_log()
+        return self._last_log
+
+
+class GitStatusChecker(BaseStatusChecker):
+
+    def _determine_needrelease_from_log(self, log):
+        # release if theres still logs after stripping the final 6 lines
+        out = log.split('\n')[:-6]
+        for l in out:
+            if l.strip():
+                return True
+        return False
+
+
+class SvnStatusChecker(BaseStatusChecker):
+    def _determine_needrelease_from_log(self, log):
+        out = log.split('\n')[6:]
+        for l in out:
+            if l.strip():
+                return True
+        return False
+
+def StatusChecker(vcs):
+    if isinstance(vcs, git.Git):
+        return GitStatusChecker(vcs)
+    if isinstance(vcs, svn.Subversion):
+        return SvnStatusChecker(vcs)
+    print "this releaser does not support %s" % str(vcs.__class__.__name__)
+    sys.exit(1)
+
+class BaseReleaser(object):
+       
+    _releaser_cmd = 'fullrelease'
+    _versionsfilename = 'releaseversions.cfg'
+
+    def __init__(self, buildoutdir, cfg, packages=None):
+        self.buildoutdir = buildoutdir
+        self.cfg = cfg
+        self.sourcesdir = os.path.join(
+            buildoutdir, cfg.get('buildout','sources-dir')
+        )
+        self.packages = packages or []
+        self.versions = {}
+        self.init_versions()
+
+    def init_versions(self):
+        for packagename in self.packages:
+            os.chdir(os.path.join(self.sourcesdir, packagename))
+            vcs = version_control()
+            available_tags = vcs.available_tags()
+            if not available_tags:
+                continue
+            self.versions[packagename] = available_tags[-1]
+        return
+
+    def release_all(self):
+        for packagename in self.packages:
+            self.release(packagename)
+        self.write_versions()
+
+    def release(self, packagename):
+        os.chdir(os.path.join(self.sourcesdir, packagename))
+        vcs = version_control()
+        statcheck = StatusChecker(vcs)
+        if not statcheck.need_release():
+            print "Skipping %s" % packagename
+            return
+        print statcheck.log_since_last_release()
+        releaseme = raw_input('Release %s? (y/N/abort)' % packagename)
+        if releaseme.lower().strip() == 'y':
+            self.versions[packagename] = utils.cleanup_version(
+                vcs.version
+            )
+            os.system(self._releaser_cmd)
+        elif releaseme.lower().strip().startswith('a'):
+            sys.exit(1)
+
+
+    def write_versions(self):
+        config = ConfigParser()
+        config.optionxform = str
+        versionfile = os.path.join(self.buildoutdir, self._versionsfilename)
+        oldversionfile = '%s.old' % versionfile
+        if os.path.exists(versionfile):
+            config.readfp(open(versionfile))
+            shutil.move(versionfile, oldversionfile)
+        if not config.has_section('versions'):
+            config.add_section('versions')
+        for key, version in self.versions.items():
+            config.set('versions', key, version)
+
+        stream = StringIO()
+
+        #empty the config
+        config.write(stream)
+
+        result = stream.getvalue()
+        open(versionfile, 'w').write(result)
+
+
+AUTO_RELEASE="""${auto-release}"""
+auto_release =[p.strip() for p in AUTO_RELEASE.split('\n') if p.strip()]
+
+config = ConfigParser()
+basedir = '${buildout:directory}'
+#config.readfp(open('/tank/inigo/wcc/buildout/buildout.cfg'))
+#releaser = BaseReleaser('/tank/inigo/wcc/buildout', config)
+config.optionxform = str
+config.readfp(open(os.path.join(basedir, 'buildout.cfg')))
+releaser = BaseReleaser(basedir, config, packages=auto_release)
+releaser.release_all()
