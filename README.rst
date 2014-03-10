@@ -18,6 +18,8 @@ Requirements
 
 * ejabberd-2.1.12
 
+* openldap-devel
+
 Deploying
 ----------
 
